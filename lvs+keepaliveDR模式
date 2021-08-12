@@ -1,0 +1,82 @@
+keepalived.conf配置文件：
+
+global_defs {
+   router_id LVS_BigData_log
+}
+
+vrrp_instance VI_1 {
+    state BACKUP	
+    interface eth0
+    virtual_router_id 81
+    priority 200
+    nopreempt
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        10.8.120.114
+    }
+}
+virtual_server 10.8.120.114 7382 {    # 设置在虚拟IP上的服务
+    delay_loop 6
+    #lb_algo lc                       # 负载分担模式
+    lb_algo sh
+    lb_kind DR                       # LVS模式
+#    persistence_timeout 50
+    protocol UDP
+ 
+    real_server 10.8.120.106 7382 {   # real server设置
+        weight 1                   # real server权重
+        #TCP_CHECK {
+        #    connect_timeout 3
+        #    nb_get_retry 3
+        #    delay_before_retry 3
+        #    connect_prot 7382
+        #}
+        MISC_CHECK {
+            misc_path "/root/udp_check.sh 10.8.120.106 7382"
+            misc_timeout 3
+        }
+    }
+    real_server 10.8.120.107 7382 {
+        weight 1
+        #TCP_CHECK {
+        #    connect_timeout 3
+         #   nb_get_retry 3
+         #   delay_before_retry 3
+         #   connect_prot 7382
+        #}
+        MISC_CHECK {
+            misc_path "/root/udp_check.sh 10.8.120.107 7382"
+            misc_timeout 3
+        }
+    }
+    real_server 10.8.120.108 7382 {
+        weight 1
+    #    TCP_CHECK {
+    #        connect_timeout 3
+    #        nb_get_retry 3
+    #        delay_before_retry 3
+    #        connect_prot 7382
+    #    }
+        MISC_CHECK {
+            misc_path "/root/udp_check.sh 10.8.120.108 7382"
+            misc_timeout 3
+        }
+    }
+    real_server 10.8.120.109 7382 {
+        weight 1
+    #    TCP_CHECK {
+    #        connect_timeout 3
+    #        nb_get_retry 3
+    #        delay_before_retry 3
+    #        connect_prot 7382
+    #    }
+        MISC_CHECK {
+            misc_path "/root/udp_check.sh 10.8.120.109 7382"
+            misc_timeout 3
+        }
+    }
+}
