@@ -1,0 +1,1286 @@
+input{
+    kafka {
+        bootstrap_servers => "10.8.120.57:9092"
+        topics => ["langfanglog"]
+        client_id => "logstash1"
+        group_id => "logstash"
+        auto_offset_reset => "earliest"
+        consumer_threads => 6  # number (optional)， default: 1
+        decorate_events => true # boolean (optional)， default: false
+    }
+}
+
+filter{
+    json{
+        source => "message"
+    }
+    mutate {
+        add_field => ["log_tag",""]
+    }
+    if "FTSAFE" in [message] {
+        mutate {
+            replace => {"raw_msg" => "%{message}"}
+        }
+        if "adminLog" in [message] {
+            mutate {
+                split => ["raw_msg", "adminLog:{"]
+                update => ["log_tag", "FTOTPADMIN"]
+            }
+            mutate{
+                gsub => ["[raw_msg][1]", "}", ""]
+                gsub => ["[raw_msg][1]", ":", "="]
+                gsub => ["[raw_msg][1]", '"', ""]
+                gsub => ["[raw_msg][1]", ' ', ""]
+            }
+            kv {
+                source => "[raw_msg][1]"
+                field_split => ","
+            }
+        }
+        else if "userLog" in [raw_msg] {
+            mutate {
+                split => ["raw_msg", "userLog:{"]
+                update => ["log_tag", "FTOTPUSER"]
+            }
+            mutate{
+                gsub => ["[raw_msg][1]", "}", ""]
+                gsub => ["[raw_msg][1]", ":", "="]
+                gsub => ["[raw_msg][1]", '"', ""]
+                gsub => ["[raw_msg][1]", ' ', ""]
+            }
+            kv {
+                source => "[raw_msg][1]"
+                field_split => ","
+            }
+        }
+    }
+    #记录用户命令。
+    #·如果命令执行成功，则只记录日志SHELL/5/CMDRECORD。
+    #·如果命令执行失败，则会记录日志SHELL/5/CMDRECORD和SHELL/5/CMDRECORDFAILED。
+    #SHELL/?/DISPLAY_CMDRECORD 记录用户display命令
+    if "CMDRECORD" in [message] or "CMDCONFIRM_UNIFORMRECORD" in [message] or "CMDCONFIRM_NOPROMPT" in [message] {
+        mutate {
+            replace => {"raw_msg" => "%{message}"}
+        }
+        if "command information." in [raw_msg] {
+            mutate{
+                split => ["raw_msg", "command information. "]
+            }
+            mutate{
+                gsub => ["[raw_msg][1]", ", ", ","]
+                gsub => ["[raw_msg][1]", "\(", ""]
+                gsub => ["[raw_msg][1]", "\)", ""]
+            }
+            kv {
+                source => "[raw_msg][1]"
+                field_split => ",?"
+            }
+            mutate {
+                split => ["[raw_msg][0]", " %%"]
+                split => ["[raw_msg][0][1]", "Record"]
+            }
+            mutate {
+                replace => {"str_timename" => "%{[raw_msg][0][0]}"}
+                add_field => ["cmdinfo_log_type", "%{[raw_msg][0][1][0]}"]
+                update => {"log_tag" => "%{log_tag}_cmdinfo"}
+            }
+        }
+        else if "(l): " in [raw_msg] and "task:" in [raw_msg] {
+            mutate {
+                split => ["raw_msg", "(l): "]
+                update => ["log_tag", "%{log_tag}_cmdmao"]
+            }
+            mutate {
+                gsub => ["[raw_msg][1]", ":", "="]
+                split => ["[raw_msg][0]", " "]
+                split => ["[raw_msg][1]", "command="]
+            }
+            mutate {
+                replace => {"dev_name" => "%{[raw_msg][0][-2]}"}
+                replace => {"cmd_log_type" => "%{[raw_msg][0][-1]}"}
+                replace => {"command" => "%{[raw_msg][1][1]}"}
+            }
+            kv {
+                source => "[raw_msg][1][0]"
+                field_split => " "
+            }
+        }
+        else if "(l): " in [raw_msg] and "task=" in [raw_msg] {
+            mutate {
+                split => ["raw_msg", "(l): "]
+                update => ["log_tag", "%{log_tag}_cmddeng"]
+            }
+            mutate {
+                split => ["[raw_msg][0]", " "]
+                gsub => ["[raw_msg][1]", ", ", ","]
+            }
+            mutate {
+                replace => {"dev_name" => "%{[raw_msg][0][-2]}"}
+                replace => {"cmd_log_type" => "%{[raw_msg][0][-1]}"}
+            }
+            kv {
+                source => "[raw_msg][1]"
+                field_split => ","
+            }
+        }
+        mutate {
+            remove_field => "raw_msg"
+        }
+    }
+    #过滤DDOS设备攻击日志
+    if "ip_attack" in [message] or "ip_attack_sum" in [message] {
+        mutate {
+            replace => ["raw_msg", "%{message}"]
+        }
+        mutate {
+            split => ["raw_msg", "(l):"]
+        }
+        kv {
+            source => "[raw_msg][1]"
+            field_split => " "
+        }
+        mutate {
+            split => ["[raw_msg][0]", " %%"]
+        }
+        mutate {
+            replace => ["ddos_attack_log_type", "%{[raw_msg][0][1]}"]
+            replace => ["ddos_attack_type", "%{log_type}"]
+            update => ["log_tag", "%{log_tag}_ddosattack"]
+            remove_field => "raw_msg"
+        }
+    }
+    if "SEC/5/ATCKDF(l)" in [message] and ("ip_drop" in [message] or "ip_flow" in [message]) {
+        mutate {
+            replace => ["raw_msg", "%{message}"]
+        }
+        mutate {
+            split => ["raw_msg", "(l):"]
+        }
+        mutate {
+            gsub => ["[raw_msg][1]", "= ", "  "]
+            split => ["[raw_msg][0]", " %%"]
+        }
+        mutate {
+            add_field => ["ddos_clean_log_type", "%{[raw_msg][0][1]}"]
+            update => {"log_tag" => "%{log_tag}_ddoscleanlog"}
+            replace => {"str_timename" => "%{[raw_msg][0][0]}"}
+        }
+        kv {
+            source => "[raw_msg][1]"
+            field_split => " "
+        }
+        mutate {
+            replace => ["ddos_clean_type", "%{log_type}"]
+            remove_field => "raw_msg"
+        }
+    }
+    if "eSight_python_slotHistory" in [message] {
+        mutate{
+            split => ["message","|"]
+            update => {"log_tag" => "%{log_tag}_eSightSlotIndex"}
+            add_field =>   {"baseName" => "%{[message][1]}"}
+            add_field =>   {"devName" => "%{[message][2]}"}
+            add_field =>   {"slotName" => "%{[message][3]}"}
+            add_field =>   {"avgCPU" => "%{[message][4]}"}
+            add_field =>   {"avgMEM" => "%{[message][5]}"}
+            add_field =>   {"timestamp" => "%{[message][6]}"}
+        }
+    }
+    else if "eSight_python_portHistory" in [message] {
+        mutate{
+            split => ["message","|"]
+            update => {"log_tag" => "%{log_tag}_eSightPortIndex"}
+            add_field =>   {"baseName" => "%{[message][1]}"}
+            add_field =>   {"devName" => "%{[message][2]}"}
+            add_field =>   {"portName" => "%{[message][3]}"}
+            add_field =>   {"InBandRate" => "%{[message][4]}"}
+            add_field =>   {"OutBandRate" => "%{[message][5]}"}
+            add_field =>   {"timestamp" => "%{[message][6]}"}
+        }
+    }
+    else if "eSight_python_Softversion" in [message] {
+        mutate{
+            split => ["message","|"]
+            update => {"log_tag" => "%{log_tag}_eSightSoftversion"}
+            add_field => {"baseName" => "%{[message][1]}"}
+            add_field => {"devName" => "%{[message][2]}"}
+            add_field => {"devtype" => "%{[message][3]}"}
+            add_field => {"devip" => "%{[message][4]}"}
+            add_field => {"softversion" => "%{[message][5]}"}
+        }
+    }
+    else if "eSight_python_Serverdevice" in [message] {
+        mutate{
+            split => ["message","|"]
+            update => {"log_tag" => "%{log_tag}_eSightServerdevice"}
+            add_field =>   {"baseName" => "%{[message][1]}"}
+            add_field =>   {"dn" => "%{[message][2]}"}
+            add_field =>   {"ipAddress" => "%{[message][3]}"}
+            add_field =>   {"serverName" => "%{[message][4]}"}
+            add_field =>   {"serverModel" => "%{[message][5]}"}
+            add_field =>   {"uuid" => "%{[message][6]}"}
+            add_field => {"aliasname" => "%{[message][7]}"}
+        }
+    }
+    if ("USG" in [message] and "LOGINSUC" in [message]) or (("svn" in [message] or "SVN" in [message]) and "LOGINSUC" in [message]) or (("vpn" in [message] or "VPN" in [message]) and "LOGINSUC" in [message]) {
+        mutate {
+            replace => ["raw_msg","%{message}"]
+        }
+        if '(l): ' in [raw_msg] {
+            mutate {
+                split => ["raw_msg", '(l): ']
+                update => {"log_tag" => "%{log_tag}_vpnloginsuc"}
+                split => ["raw_msg[0]", " "]
+            }
+            mutate {
+                replace => ["dev_name", "%{[raw_msg][0][-2]}"]
+                add_field => ["vpn_log_type", "%{[raw_msg][0][-1]}(l)"]
+            }
+        }
+        else if ']:' in [raw_msg] {
+            mutate {
+                split => ["raw_msg", ']:']
+                update => {"log_tag" => "%{log_tag}_vpnloginsuc"}
+                split => ["raw_msg[0]", '(l)']
+                split => ["raw_msg[0][0]", " "]
+            }
+            mutate {
+                replace => ["dev_name", "%{[raw_msg][0][0][-2]}"]
+                add_field => ["vpn_log_type", "%{[raw_msg][0][0][-1]}(l)"]
+            }
+        }
+        else {
+            mutate {
+                split => ["raw_msg", "time="]
+                update => {"log_tag" => "%{log_tag}_vpnloginsuc"}
+                split => ["raw_msg[0]", "(l)"]
+                split => ["raw_msg[0][0]"," "]
+            }
+            mutate {
+                replace => ["dev_name", "%{[raw_msg][0][0][-2]}"]
+                replace => ["vpn_log_type", "%{[raw_msg][0][0][-1]}(l)"]
+                replace => ["kv_str", "time=%{[raw_msg][1]}"]
+            }
+            mutate {
+                replace => ["[raw_msg][1]","%{kv_str}"]
+                remove_field => "kv_str"
+            }
+        }
+        mutate {
+            gsub => ["raw_msg[1]", "fw= pri", "fw=none pri"]
+        }
+        kv {
+            source => "raw_msg[1]"
+            field_split => " "
+        }
+        mutate {
+            remove_field => "raw_msg"
+        }
+    }
+    if ("USG" in [message] and "USRPWDERR" in [message]) or (("svn" in [message] or "SVN" in [message]) and "USRPWDERR" in [message]) or (("vpn" in [message] or "VPN" in [message]) and "USRPWDERR" in [message]) {
+        mutate {
+            replace => ["raw_msg","%{message}"]
+        }
+        if '(l): ' in [raw_msg] {
+            mutate {
+                split => ["raw_msg", '(l): ']
+                update => {"log_tag" => "%{log_tag}_vpnusrpwderr"}
+                split => ["raw_msg[0]", " "]
+            }
+            mutate {
+                replace => ["dev_name", "%{[raw_msg][0][-2]}"]
+                add_field => ["vpn_log_type", "%{[raw_msg][0][-1]}(l)"]
+            }
+        }
+        else if ']:' in [raw_msg] {
+            mutate {
+                split => ["raw_msg", ']:']
+                update => {"log_tag" => "%{log_tag}_vpnusrpwderr"}
+                split => ["raw_msg[0]", '(l)']
+                split => ["raw_msg[0][0]", " "]
+            }
+            mutate {
+                replace => ["dev_name", "%{[raw_msg][0][0][-2]}"]
+                add_field => ["vpn_log_type", "%{[raw_msg][0][0][-1]}(l)"]
+            }
+        }
+        mutate {
+            gsub => ["raw_msg[1]", "fw= pri", "fw=none pri"]
+        }
+        kv {
+            source => "raw_msg[1]"
+            field_split => " "
+        }
+        mutate {
+            remove_field => "raw_msg"
+        }
+    }
+    if "USG" in [message] or "usg" in [message] or "Usg" in [message] {
+        mutate {
+            replace => ["raw_msg", "%{message}"]
+        }
+        if "POLICYPERMIT(l)" in [raw_msg] {
+            mutate {
+                gsub => ["[raw_msg]", "; ", ","]
+                gsub => ["[raw_msg]", " ;", ","]
+                gsub => ["[raw_msg]", " :", ":"]
+                gsub => ["[raw_msg]", ": ", ":"]
+                gsub => ["[raw_msg]", ", ", ","]
+                gsub => ["[raw_msg]", " ,", ","]
+                gsub => ["[raw_msg]", ";", ","]
+                gsub => ["[raw_msg]", "\[(.*?)\]:", ":"]
+                split => ["raw_msg","(l):"]
+                update => {"log_tag" => "%{log_tag}_usgpolicypermit"}
+                split => ["raw_msg[0]"," "]
+            }
+            mutate {
+                replace => ["dev_name", "%{[raw_msg][0][-2]}"]
+                replace => ["log_type", "%{[raw_msg][0][-1]}"]
+            }
+            kv {
+                source => "raw_msg[1]"
+                field_split => ','
+            }
+        }
+        else if "SESSION" in [raw_msg] {
+            mutate{
+                split => ["raw_msg", "(l)"]
+                add_field => ["str_timename", "%{[raw_msg][0]}"]
+            }
+            mutate {
+                split => ["raw_msg[0]"," "]
+                add_field => ["dev_name", "%{[raw_msg][0][-2]}"]
+                add_field => ["usg_log_type", "%{[raw_msg][0][-1]}"]
+            }
+            if "-DevIP" in [raw_msg][1] {
+                grok{
+                    match => {
+                        "[raw_msg][1]" => "(.*?): -DevIP=%{IP:EventSrcIP}; Protocol:%{NOTSPACE:Protocol}; %{IP:SourceIP}:%{INT:SourcePort};( %{IP:SourceNatIP}:%{INT:SourceNatPort};|) -->%{IP:DestinationIP}:%{INT:DestinationPort};( %{IP:DestinationNatIP}:%{INT:DestinationNatPort};|) \[%{DATA:BeginTime} - %{DATA:EndTime}\] Src VPN ID:%{INT:SourceVpnID} Dst VPN ID:%{INT:DestinationVpnID}; status:%{DATA:status}User name:%{DATA:UserName};.*$"
+                    }
+                }
+                mutate {
+                    update => ["log_tag", "%{log_tag}_USGSESSION"]
+                }
+            }
+            else{
+                mutate{
+                    split => ["[raw_msg][1]",":"]
+                }
+                mutate{
+                    gsub => ["[raw_msg][1][1]", "\.$", ""]
+                    update => {"log_tag" => "%{log_tag}_USGSESSIONOTHER"}
+                }
+                kv {
+                    source => "[raw_msg][1][1]"
+                    field_split => ",?"
+                }
+            }
+        }
+        mutate {
+            remove_field => "raw_msg"
+        }
+    }
+    if "ATK/4/FIREWALLATCK" in [message] {
+        mutate {
+            add_field => ["raw_msg","%{message}"]
+        }
+        mutate {
+            split => ["raw_msg", "(l):"]
+            split => ["[raw_msg][0]", " "]
+        }
+        mutate {
+            add_field => ["dev_log_type", "%{[raw_msg][0][-1]}"]
+            add_field => ["dev_name", "%{[raw_msg][0][-2]}"]
+            update => ["log_tag", "%{log_tag}_firewallatck"]
+            gsub => ["[raw_msg][1]", "receive interface", "rx_interface"]
+            gsub => ["[raw_msg][1]", "begin time", "begin_time"]
+            gsub => ["[raw_msg][1]", "end time", "end_time"]
+            gsub => ["[raw_msg][1]", "total packets", "total_packets"]
+            gsub => ["[raw_msg][1]", "max speed", "max_speed"]
+            gsub => ["[raw_msg][1]", ", ", ","]
+            gsub => ["[raw_msg][1]", " ,", ","]
+        }
+        kv {
+            source => "[raw_msg][1]"
+            field_split => ","
+        }
+        mutate {
+            update => ["log_tag", "%{log_tag}_nfatck"]
+            remove_field => "raw_msg"
+        }
+    }
+    if "SVN" in [message] and "LOGIN" in [message] {
+        mutate {
+            add_field => ["log_m_tag", "svn_login_log"]
+        }
+    }
+    if "SVN" in [message] or "Svn" in [message] or "svn" in [message] {
+        mutate {
+            replace => ["raw_msg", "%{message}"]
+        }
+        if "NEMTCPRES" in [raw_msg] {
+            mutate {
+                split => ["raw_msg", "): "]
+            }
+            mutate {
+                split => ["[raw_msg][0]", " "]
+                #add_field => {"str_timename" => "%{[raw_msg[0][0]}"}
+            }
+            mutate {
+                replace => ["dev_name", "%{[raw_msg][0][-2]}"]
+                replace => ["log_type", "%{[raw_msg][0][-1]}"]
+            }
+            kv {
+                source => "[raw_msg][1]"
+                field_split => " "
+            }
+            mutate {
+                split => ["msg", "Extension:"]
+            }
+            mutate {
+                gsub => ["[msg][1]", ", ", ","]
+                gsub => ["[msg][1]", " ", ""]
+                gsub => ["[msg][1]", ":", "="]
+                gsub => ["sent","byte\(s\)", ""]
+                gsub => ["rcvd","byte\(s\)", ""]
+                gsub => ["duration","s", ""]
+                update => {"log_tag" => "%{log_tag}_nemtcpres"}
+            }
+            kv {
+                source => "[msg][1]"
+                field_split => ","
+            }
+        }
+        else if "SVN5630" in [raw_msg] or "Svn5630" in [raw_msg] or "svn5630" in [raw_msg] { 
+            if "USERS/4/USRPWDERR" in [raw_msg] {
+                mutate {
+                    split => ["raw_msg",'USRPWDERR(l): ']
+                    add_field => {"msg_head" => "%{[raw_msg][0]}"}
+                    update => {"log_tag" => "%{log_tag}_svnusrpwderr"}
+                }
+                kv {
+                    source => "[raw_msg][1]"
+                    field_split => " "
+                }
+                mutate {
+                    split => ["[raw_msg][0]"," "]
+                    add_field => {"vpn_log_type" => "%{[raw_msg][0][-1]}USRPWDERR(l)"}
+                    add_field => {"log_date_str" => "%{[raw_msg][0][3]}"}
+                    add_field => {"log_time_str" => "%{[raw_msg][0][2]}"}
+                }
+            }
+            else if "USERS/5/LOGINSUC" in [raw_msg] {
+                mutate {
+                    split => ["raw_msg",'LOGINSUC(l): ']
+                    update => {"log_tag" => "%{log_tag}_svnloginsuc"}
+                }
+                kv {
+                    source => "[raw_msg][1]"
+                    field_split => " "
+                }
+                mutate {
+                    split => ["[raw_msg][0]"," "]
+                    add_field => {"vpn_log_type" => "%{[raw_msg][0][-1]}LOGINSUC(l)"}
+                    add_field => {"log_date_str" => "%{[raw_msg][0][3]}"}
+                    add_field => {"log_time_str" => "%{[raw_msg][0][2]}"}
+                }
+            }
+        }
+        else if "SVN5660" in [raw_msg] or "Svn5660" in [raw_msg] or "svn5660" in [raw_msg] {
+            if "USERS/4/USRPWDERR" in [raw_msg	] {
+                mutate {
+                    split => ["raw_msg",'USRPWDERR(l): ']
+                    add_field => {"msg_head" => "%{[raw_msg][0]}"}
+                    update => {"log_tag" => "%{log_tag}_svnusrpwderr"}
+                }
+                kv {
+                    source => "[raw_msg][1]"
+                    field_split => " "
+                }
+                mutate {
+                    split => ["[raw_msg][0]"," "]
+                    add_field => {"vpn_log_type" => "%{[raw_msg][0][-1]}USRPWDERR(l)"}
+                    add_field => {"log_date_str" => "%{[raw_msg][0][3]}"}
+                    add_field => {"log_time_str" => "%{[raw_msg][0][2]}"}
+                }
+            }
+            else if "USERS/5/LOGINSUC" in [raw_msg] {
+                mutate {
+                    split => ["raw_msg",'LOGINSUC(l): ']
+                    update => {"log_tag" => "%{log_tag}_svnloginsuc"}
+                }
+                kv {
+                    source => "[raw_msg][1]"
+                    field_split => " "
+                }
+                mutate {
+                    split => ["[raw_msg][0]"," "]
+                    add_field => {"vpn_log_type" => "%{[raw_msg][0][-1]}LOGINSUC(l)"}
+                    add_field => {"log_date_str" => "%{[raw_msg][0][3]}"}
+                    add_field => {"log_time_str" => "%{[raw_msg][0][2]}"}
+                }
+            }
+        }
+        else if "SVN5830" in [raw_msg] or "Svn5830" in [raw_msg] or "svn5830" in [raw_msg] or "SVN5600" in [raw_msg] or "Svn5600" in [raw_msg] or "svn5600" in [raw_msg] {
+            if "USERS/4/USRPWDERR" in [raw_msg  ] {
+                mutate {
+                    split => ["raw_msg",'USRPWDERR(l): ']
+                    add_field => {"msg_head" => "%{[raw_msg][0]}"}
+                    update => {"log_tag" => "%{log_tag}_svnusrpwderr"}
+                }
+                kv {
+                    source => "[raw_msg][1]"
+                    field_split => " "
+                }
+                mutate {
+                    split => ["[raw_msg][0]"," "]
+                    add_field => {"vpn_log_type" => "%{[raw_msg][0][-1]}USRPWDERR(l)"}
+                    add_field => {"log_date_str" => "%{[raw_msg][0][3]}"}
+                    add_field => {"log_time_str" => "%{[raw_msg][0][2]}"}
+                }
+            }
+            else if "USERS/5/LOGINSUC" in [raw_msg] {
+                mutate {
+                    split => ["raw_msg",'LOGINSUC(l): ']
+                    update => {"log_tag" => "%{log_tag}_svnloginsuc"}
+                }
+                kv {
+                    source => "[raw_msg][1]"
+                    field_split => " "
+                }
+                mutate {
+                    split => ["[raw_msg][0]"," "]
+                    add_field => {"vpn_log_type" => "%{[raw_msg][0][-1]}LOGINSUC(l)"}
+                    add_field => {"log_date_str" => "%{[raw_msg][0][3]}"}
+                    add_field => {"log_time_str" => "%{[raw_msg][0][2]}"}
+                }
+            }
+        }
+        mutate {
+            remove_field => "raw_msg"
+        }
+    }
+    if "nip" in [message] or "Nip" in [message] or "NIP" in [message] or "IPS" in [message] {
+        grok {
+            match => ["message","%{TIMESTAMP_ISO8601:time}"]
+        }
+        mutate {
+            replace => ["raw_msg", "%{message}"]
+        }
+        mutate {
+            gsub => ["raw_msg", ", ", ","]
+            gsub => ["raw_msg", " ,", ","]
+            gsub => ["raw_msg", ": ", ":"]
+        }
+        if 'POLICYPERMIT(l)' in [raw_msg] {
+            mutate {
+                split => ["raw_msg", '(l):']
+                update => ["log_tag", "%{log_tag}_nipvisitlog"]
+            }
+            mutate {
+                split => ["[raw_msg][0]"," "]
+                add_field => ["dev_name","%{[raw_msg][0][-2]}"]
+                add_field => ["dev_log_type","%{[raw_msg][0][-1]}"]
+            }
+            mutate {
+                gsub => ["[raw_msg][1]", "source-ip", "SrcIp"]
+                gsub => ["[raw_msg][1]", "source-port", "SrcPort"]
+                gsub => ["[raw_msg][1]", "vsys", "VSys"]
+                gsub => ["[raw_msg][1]", " VSys", "VSys"]
+                gsub => ["[raw_msg][1]", "protocol", "Protocol"]
+                gsub => ["[raw_msg][1]", "destination-ip", "DstIp"]
+                gsub => ["[raw_msg][1]", "destination-port", "DstPort"]
+                gsub => ["[raw_msg][1]", "application-name", "Application"]
+                gsub => ["[raw_msg][1]", "rule-name", "RuleName"]
+            }
+            kv {
+                source => "[raw_msg][1]"
+                field_split => ','
+            }
+            mutate {
+                gsub => ["time","\/", "-"]
+            }
+        }
+        else if 'EXCEPTION(l)' in [raw_msg] {
+            mutate {
+                split => ["raw_msg", 'signature. (']
+                update => ["log_tag", "%{log_tag}_nipvisitlog"]
+            }
+            mutate {
+                update => ["log_tag", "%{log_tag}_nfatck"]
+                split => ["raw_msg[0]",'(l): ']
+                split => ["[raw_msg][0][0]", " "]
+                add_field => ["dev_name","%{[raw_msg][0][0][-2]}"]
+                add_field => ["dev_log_type","%{[raw_msg][0][0][-1]}"]
+                add_field => ["time", "%{[raw_msg][0][0][0]} %{[raw_msg][0][0][1]} %{[raw_msg][0][0][2]}"]
+            }
+            mutate {
+                gsub => ["raw_msg[1]", '\)', ""]
+                gsub => ["time", "\/", "-"]
+            }
+            date {
+                match => ["time", "MMM dd HH:mm:ss"]
+                target => "log_time"
+            }
+            ruby {
+                code => "event.set('time', event.get('log_time').time.localtime + 8*60*60)"
+            }
+            kv {
+                source => "raw_msg[1]"
+                field_split => ","
+            }
+            mutate {
+                remove_field => "log_time"
+            }
+        }
+        else if 'THREATTRAP' in [raw_msg] {
+            mutate {
+                gsub => ["raw_msg", ": OID", ":OID"]
+                gsub => ["raw_msg", '\)', '']
+                split => ["raw_msg", 'detected.( ']
+                update => ["log_tag", "%{log_tag}_nipvisitlog"]
+            }
+            mutate {
+                split => ["[raw_msg][0]", ":OID"]
+                split => ["[raw_msg][0][0]", " "]
+                add_field => ["dev_name", "%{[raw_msg][0][0][-2]}"]
+                add_field => ["dev_log_type", "%{[raw_msg][0][0][-1]}"]
+            }
+            kv {
+                source => "[raw_msg][1]"
+                field_split => ','
+            }
+            mutate {
+                add_field => ["time", "%{DetectTime}"]
+            }
+            mutate {
+                gsub => ["time", "\/", "-"]
+            }
+        }
+        else if 'BOTNET(l)' in [raw_msg] or 'DETECT(l)' in [raw_msg] or 'WORM(l)' in [raw_msg] or 'TROJAN(l)' in [raw_msg] or 'ATTACK' in [raw_msg] {
+            mutate {
+                split => ["raw_msg",'detected. (']
+                update => ["log_tag", "%{log_tag}_nipvisitlog"]
+            }
+            mutate {
+                update => ["log_tag", "%{log_tag}_nfatck"]
+                split => ["[raw_msg][0]", "(l):"]
+                split => ["[raw_msg][0][0]", " "]
+                add_field => ["dev_name","%{[raw_msg][0][0][-2]}"]
+                add_field => ["dev_log_type", "%{[raw_msg][0][0][-1]}"]
+                add_field => ["time", "%{[raw_msg][0][0][0]} %{[raw_msg][0][0][1]} %{[raw_msg][0][0][2]}"]
+                gsub => ["[raw_msg][1]", '\)', '']
+            }
+            date {
+                match => ["time", "MMM dd HH:mm:ss"]
+                target => "log_time"
+            }
+            ruby {
+                code => "event.set('time', event.get('log_time').time.localtime + 8*60*60)"
+            }
+            mutate {
+                remove_field => "log_time"
+                gsub => ["time", "\/", "-"]
+            }
+            kv {
+                source => "[raw_msg][1]"
+                field_split => ','
+            }
+        }
+        mutate {
+            remove_field => "raw_msg"
+        }
+    }
+    if "safeline_event" in [message] and "high" in [message] {
+        mutate {
+            replace => ["raw_msg", "%{message}"]
+        }
+        mutate {
+            split => ["raw_msg", "safeline_event[1]: "]
+            update => ["log_tag", "%{log_tag}_SAFELINEEVENT"]
+        }
+        grok {
+            match => {
+                "[raw_msg][1]" => "%{NUMBER:time_str}\"%{IP:src_ip}\"%{NUMBER:src_port}\"%{IP:dest_ip}\"%{NUMBER:dest_port}\"%{USERNAME:event_id}\"\"%{USERNAME:attack_type}\"\"%{NOTSPACE:location}\"\"%{USERNAME:risk}\"\"%{NOTSPACE:host_str}\""
+            }
+        }
+        mutate {
+            replace => {"msg" => '"%{time_str}","%{src_ip}","%{src_port}","%{dest_ip}","%{dest_port}","%{event_id}","%{attack_type}","%{location}","%{risk}","%{host_str}"'}
+        }
+        mutate {
+            remove_field => "raw_msg"
+        }
+    }
+    if "yunxiazi" in [message] {
+        mutate {
+            replace => ["raw_msg", "%{message}"]
+        }
+        mutate {
+            gsub => ["[raw_msg]", "yunxiazi.* Time", "yunxiazi Time"]
+        }
+        if ",Command=" in [raw_msg] {
+            mutate {
+                split => ["raw_msg", "yunxiazi "]
+                update => ["log_tag", "%{log_tag}_yunxiazicmd"]
+            }
+            kv {
+                source => "raw_msg[1]"
+                field_split => ','
+            }
+        }
+        else if ",Operation=" in [raw_msg] {
+            mutate {
+                split => ["raw_msg", "yunxiazi "]
+                update => ["log_tag", "%{log_tag}_yunxiaziops"]
+            }
+            kv {
+                source => "raw_msg[1]"
+                field_split => ','
+            }
+        }
+        else if ",Account=" in [raw_msg] {
+            mutate {
+                split => ["raw_msg", "yunxiazi "]
+                update => ["log_tag", "%{log_tag}_yunxiaziacc"]
+            }
+            kv {
+                source => "raw_msg[1]"
+                field_split => ','
+            }
+        }
+        mutate {
+            remove_field => "raw_msg"
+        }
+    }
+    if "[Anmeng]" in [message] {
+        mutate {
+            replace => ["raw_msg","%{message}"]
+        }
+        mutate {
+            split => ["raw_msg", "[Anmeng]"]
+            update => ["log_tag", "%{log_tag}_anmeng"]
+        }
+        mutate {
+            replace => {"update_msg" => "%{[raw_msg][1]}"}
+        }
+        mutate {
+            remove_field => "raw_msg"
+        }
+    }
+    if "NE40" in [message] {
+        mutate {
+            replace => ["raw_msg", "%{message}"]
+        }
+        if "LOGIN(s)" in [raw_msg] {
+            mutate {
+                split => ["raw_msg", ". ("]
+                split => ["[raw_msg][1]", ")#015"]
+                split => ["[raw_msg][0]", "(s)"]
+                split => ["[raw_msg][0][0]", " "]
+            }
+            mutate {
+                add_field => ["logdate", "%{[raw_msg][0][0][0]} %{[raw_msg][0][0][1]} %{[raw_msg][0][0][5]} %{[raw_msg][0][0][2]}"]
+                gsub => ["[raw_msg][1][0]", ", ", ","]
+                gsub => ["[raw_msg][1][0]", "IPAddress=", "Ip="]
+                gsub => ["[raw_msg][1][0]", "VPNInstanceName=", "VpnName="]
+                gsub => ["[raw_msg][1][0]", "FailedReason=", "Reason="]
+                gsub => ["[raw_msg][1][0]", "ServiceType=", "UserType="]
+                add_field => ["dev_name", "%{[raw_msg][0][0][-2]}"]
+                add_field => ["log_type", "%{[raw_msg][0][0][-1]}"]
+                add_field => ["dev_type", "NE40"]
+                update => ["log_tag", "%{log_tag}_nelogin"]
+            }
+            date {
+                match => ["logdate", "MMM dd yyyy HH:mm:ss", "yyyy/mm/dd HH:mm:ss"]
+            }
+            ruby {
+                code => "event.set('logdate', event.get('@timestamp').time.localtime + 8*60*60)"
+            }
+            kv {
+                source => "[raw_msg][1][0]"
+                field_split => ","
+            }
+        }
+        else if "LOGIN_FAIL(s)" in [raw_msg] {
+            mutate {
+                split => ["raw_msg", ". ("]
+                split => ["[raw_msg][0]", "(s)"]
+                split => ["[raw_msg][0][0]", " "]
+            }
+            mutate {
+                add_field => ["logdate", "%{[raw_msg][0][0][0]} %{[raw_msg][0][0][1]} %{[raw_msg][0][0][2]}"]
+                gsub => ["[raw_msg][1][0]", ", ", ","]
+                gsub => ["[raw_msg][1][0]", "IPAddress=", "Ip="]
+                gsub => ["[raw_msg][1][0]", "VPNInstanceName=", "VpnName="]
+                gsub => ["[raw_msg][1][0]", "FailedReason=", "Reason="]
+                gsub => ["[raw_msg][1][0]", "ServiceType=", "UserType="]
+                add_field => ["dev_name", "%{[raw_msg][0][0][-2]}"]
+                add_field => ["log_type", "%{[raw_msg][0][0][-1]}"]
+                add_field => ["dev_type", "NE40"]
+                update => ["log_tag", "%{log_tag}_nelogin"]
+            }
+            date {
+                match => ["logdate", "MMM dd HH:mm:ss", "yyyy/mm/dd HH:mm:ss"]
+            }
+            ruby {
+                code => "event.set('logdate', event.get('@timestamp').time.localtime + 8*60*60)"
+            }
+             kv {
+                source => "[raw_msg][1]"
+                field_split => ","
+            }
+        }
+        mutate {
+            remove_field => "raw_msg"
+        }
+    }
+    if "USG" in [message] {
+        mutate {
+            replace => ["raw_msg", "%{message}"]
+        }
+        if "LOGIN_FAILED" in [raw_msg] {
+            mutate {
+                split => ["raw_msg", ".("]
+                gsub => ["raw_msg", ": OID", ":OID"]
+                split => ["[raw_msg][0]", ":OID"]
+                split => ["[raw_msg][0][0]", " "]
+            }
+            mutate {
+                add_field => ["dev_name", "%{[raw_msg][0][0][-2]}"]
+                add_field => ["log_type", "%{[raw_msg][0][0][-1]}"]
+                gsub => ["[raw_msg][1]", " = ", "="]
+                gsub => ["[raw_msg][1]", ", ", ","]
+                gsub => ["[raw_msg][1]", "userIP", "Ip"]
+                gsub => ["[raw_msg][1]", "accessType", "UserType"]
+                gsub => ["[raw_msg][1]", "loginTime", "logdate"]
+                add_field => ["dev_type", "USG"]
+                update => ["log_tag", "%{log_tag}_usglogin"]
+            }
+            kv {
+                source => "[raw_msg][1]"
+                field_split => ","
+            }
+        }
+        else if "LOGIN_FAIL(s)" in [raw_msg] {
+            mutate {
+                split => ["raw_msg", ". ("]
+                split => ["[raw_msg][0]", "(s)"]
+                split => ["[raw_msg][0][0]", " "]
+            }
+            mutate {
+                add_field => ["logdate", "%{[raw_msg][0][0][0]} %{[raw_msg][0][0][1]} %{[raw_msg][0][0][1]}"]
+                add_field => ["dev_name", "%{[raw_msg][0][0][-2]}"]
+                add_field => ["log_type", "%{[raw_msg][0][0][-1]}"]
+                gsub => ["[raw_msg][1]", ", ", ","]
+                update => ["log_tag", "%{log_tag}_usglogin"]
+                add_field => ["dev_type", "USG"]
+            }
+            date {
+                match => ["logdate", "MMM dd HH:mm:ss", "yyyy/mm/dd HH:mm:ss"]
+            }
+            ruby {
+                code => "event.set('logdate',event.get('@timestamp').time.localtime + 8*60*60)"
+            }
+            kv {
+                source => "[raw_msg][1]"
+                field_split => ","
+            }
+        }
+        else if "LOGIN_SUCCEED" in [raw_msg] {
+            mutate {
+                split => ["raw_msg", ".("]
+                gsub => ["raw_msg", ": OID", ":OID"]
+                split => ["[raw_msg][0]", ":OID"]
+                split => ["[raw_msg][0][0]", " "]
+            }
+            mutate {
+                add_field => ["dev_name", "%{[raw_msg][0][0][-2]}"]
+                add_field => ["log_type", "%{[raw_msg][0][0][-1]}"]
+                gsub => ["[raw_msg][1]", " = ", "="]
+                gsub => ["[raw_msg][1]", "userName", "UserName"]
+                gsub => ["[raw_msg][1]", "loginIP", "Ip"]
+                gsub => ["[raw_msg][1]", ", ", ","]
+                gsub => ["[raw_msg][1]", "accessType", "UserType"]
+                gsub => ["[raw_msg][1]", "loginTime", "logdate"]
+                update => ["log_tag", "%{log_tag}_usglogin"]
+                add_field => ["dev_type", "USG"]
+            }
+            kv {
+                source => "[raw_msg][1]"
+                field_split => ","
+            }
+        }
+        mutate {
+            remove_field => "raw_msg"
+        }
+    }
+    if "ce68" in [message] or "CE68" in [message] {
+        mutate {
+            replace => ["raw_msg", "%{message}"]
+        }
+        if "LOGIN(s)" in [raw_msg]{
+            mutate {
+                split => ["raw_msg", ". ("]
+                split => ["[raw_msg][0]", "(s):"]
+                split => ["[raw_msg][0][0]", " "]
+            }
+            mutate {
+                add_field => ["log_type", "%{[raw_msg][0][0][-1]}"]
+                add_field => ["dev_name", "%{[raw_msg][0][0][-2]}"]
+                add_field => ["logdate", "%{[raw_msg][0][0][0]} %{[raw_msg][0][0][1]} %{[raw_msg][0][0][2]}"]
+                add_field => ["dev_type", "Switch"]
+                gsub => ["[raw_msg][1]", "ServiceType", "UserType"]
+                gsub => ["[raw_msg][1]", "IPAddress", "Ip"]
+                gsub => ["[raw_msg][1]", ", ", ","]
+                gsub => ["[raw_msg][1]", "VPNInstanceName", "VpnName"]
+                update => ["log_tag", "%{log_tag}_celogin"]
+            }   
+            date {
+                match => ["logdate", "MMM dd HH:mm:ss", "yyyy/mm/dd HH:mm:ss"]
+            }
+            ruby {
+                code => "event.set('logdate',event.get('@timestamp').time.localtime + 8*60*60)"
+            }
+            kv {
+                source => "[raw_msg][1]"
+                field_split => ","
+            }
+            mutate {
+                gsub => ["VpnName", "\)", ""]
+            }
+        }
+        mutate {
+            remove_field => "raw_msg"
+        }
+    }	
+    if [str_timename] {
+        grok{
+            match => {
+                "str_timename" => "%{MONTH:month_str}?(| )( %{NUMBER:day_str})?(| )(%{HOUR:hour1}:%{MINUTE:minute1}:%{SECOND:second1})?(| )%{IP:ipaddr}?(| )(%{YEAR:year}(/|-)%{MONTHNUM:month}(/|-)%{MONTHDAY:day})?(| )(%{HOUR:hour}:(| )%{MINUTE:minute}:%{SECOND:second})? %{NOTSPACE:device_name}(| )(| %%.*)
+?(| )$"
+            }
+            remove_field => ["year","month","day","hour","minute","second","message","str_timename","month_str","day_str","hour1","minute1","second1"]
+        }
+    }
+    else {
+        mutate {
+            remove_field => "message"
+        }
+    }
+}
+output{
+    if "cmdinfo" in [log_tag] {
+        kafka {
+            bootstrap_servers => "10.8.120.59:9092"    #生产者
+            topic_id => "DEVICE_CMDRECORD"    #设置写入kafka的topic
+            compression_type => "gzip"    #消息压缩模式，默认是none，可选gzip、snappy。
+            codec => plain{
+                format => "'%{@timestamp}','%{device_name}','%{cmdinfo_log_type}','%{Task}','%{Ip}','%{VpnName}','%{User}','%{Vrf}','%{AuthenticationMethod}','%{Command}','%{PromptInfo}','%{UserInput}','%{[fields][l_type]}','%{[fields][l_id]}'"
+            }
+        }
+        #stdout { codec => rubydebug }
+    }
+    if "cmdmao" in [log_tag] or "cmddeng" in [log_tag] {
+        kafka {
+            bootstrap_servers => "10.8.120.59:9092"    #生产者
+            topic_id => "DEVICE_CMDRECORD"    #设置写入kafka的topic
+            compression_type => "gzip"    #消息压缩模式，默认是none，可选gzip、snappy。
+            codec => plain{
+                format => "'%{@timestamp}','%{device_name}','%{cmd_log_type}','%{task}','%{ip}','%{VpnName}','%{user}','%{vrf}','%{usertype}','%{command}','%{result}','%{userinput}','%{[fields][l_type]}','%{[fields][l_id]}'"
+            }
+        }
+    }
+    if "nemtcpres" in [log_tag] {
+        kafka {
+            bootstrap_servers => "10.8.120.59:9092"    #生产者
+            topic_id => "SVN_NEMTCPRES"    #设置写入kafka的topic
+            compression_type => "gzip"    #消息压缩模式，默认是none，可选gzip、snappy。
+            codec => plain{
+                format => "'%{@timestamp}','%{dev_name}','%{id}','%{fw}','%{pri}','%{vsys}','%{vpn}','%{user}','%{src}','%{dst}','%{duration}','%{rcvd}','%{sent}','%{type}','%{service}','%{sourceIP}','%{sourceport}','%{destinationIP}','%{Destinationport}','%{virtualIP}','%{clientIP}','%{[fields][l_type]}','%{[fields][l_id]}'"
+            }
+        }
+    }
+    if "ddosattack" in [log_tag] and [ddos_attack_type] == "ip_attack_sum" {
+        kafka {
+            bootstrap_servers => "10.8.120.59:9092"    #生产者
+            topic_id => "DDOS_IP_ATTACK_SUM"    #设置写入kafka的topic
+            compression_type => "gzip"    #消息压缩模式，默认是none，可选gzip、snappy。
+            codec => plain{
+                format => "'%{@timestamp}','%{device_name}','%{[ddos_attack_log_type]}','%{ddos_attack_type}','%{device_ip}','%{device_type}','%{zone_id}','%{zone_name}','%{zone_ip}','%{start_time}','%{end_time}','%{severity}','%{max_severity}','%{in_pps}','%{in_kbps}','%{drop_pps}','%{drop_kbps}','%{max_in_pps}','%{max_in_kbps}','%{curr_conn}','%{new_conn}','%{attack_type}','%{[fields][l_type]}','%{[fields][l_id]}'"
+            }
+        }
+    }
+    if "ddosattack" in [log_tag] and [ddos_attack_type] == "ip_attack" {
+        kafka {
+            bootstrap_servers => "10.8.120.59:9092"    #生产者
+            topic_id => "DDOS_IP_ATTACK"    #设置写入kafka的topic
+            compression_type => "gzip"    #消息压缩模式，默认是none，可选gzip、snappy。
+            codec => plain{
+                format => "'%{@timestamp}','%{device_name}','%{ddos_attack_log_type}','%{ddos_attack_type}','%{device_ip}','%{device_type}','%{zone_id}','%{zone_name}','%{zone_ip}','%{start_time_alert}','%{start_time_attack}','%{end_time}','%{duration}','%{attack_type}','%{protocol}','%{port}','%{attack_status}','%{drop_packets}','%{drop_kbits}','%{attacker}','%{[fields][l_type]}','%{[fields][l_id]}'"
+            }
+        }
+    }
+    if "ddoscleanlog" in [log_tag] {
+        kafka {
+            bootstrap_servers => "10.8.120.59:9092"
+            topic_id => "DDOS_CLEAN_LOG"
+            compression_type => "gzip"
+            codec => plain{
+                format => "'%{@timestamp}','%{device_name}','%{ddos_clean_log_type}','%{ddos_clean_type}','%{time}','%{device_ip}','%{device_type}','%{zone_id}','%{zone_name}','%{zone_ip}','%{biz_id}','%{is_deszone}','%{is_ipLocation}','%{ipLocation_id}','%{total_pps}','%{total_kbps}','%{tcp_pps}','%{tcp_kbps}','%{tcpfrag_pps}','%{tcpfrag_kbps}','%{udp_pps}','%{udp_kbps}','%{udpfrag_pps}','%{udpfrag_kbps}','%{icmp_pps}','%{icmp_kbps}','%{other_pps}','%{other_kbps}','%{syn_pps}','%{synack_pps}','%{ack_pps}','%{finrst_pps}','%{http_pps}','%{http_kbps}','%{http_get_pps}','%{https_pps}','%{https_kbps}','%{dns_request_pps}','%{dns_request_kbps}','%{dns_reply_pps}','%{dns_reply_kbps}','%{sip_invite_pps}','%{sip_invite_kbps}','%{tcp_increase_con}','%{udp_increase_con}','%{icmp_increase_con}','%{other_increase_con}','%{tcp_concur_con}','%{udp_concur_con}','%{icmp_concur_con}','%{other_concur_con}','%{[fields][l_type]}','%{[fields][l_id]}'"
+            }
+        }
+    }
+    if "svnusrpwderr" in [log_tag] or "vpnusrpwderr" in [log_tag] {
+        kafka {
+            bootstrap_servers => "10.8.120.59:9092"
+            topic_id => "SVN5630_LOG_USRPWDERR"
+            compression_type => "gzip"
+            codec => plain {
+                format => "'%{time}','%{[fields][l_id]}','%{[fields][l_type]}','%{vpn_log_type}','%{id}','%{time}','%{fw}','%{pri}','%{vsys}','%{vpn}','%{user}','%{src}','%{dst}','%{duration}','%{rcvd}','%{sent}','%{type}','%{service}','%{msg}'"
+            }
+        }
+    }
+    if "svnloginsuc" in [log_tag] or "vpnloginsuc" in [log_tag] {
+        kafka {
+            bootstrap_servers => "10.8.120.59:9092"
+            topic_id => "SVN5630_LOG_USERS_LOGINSUC"
+            compression_type => "gzip"
+            codec => plain {
+                format => "'%{time}','%{[fields][l_id]}','%{[fields][l_type]}','%{vpn_log_type}','%{dev_name}','%{time}','%{fw}','%{pri}','%{vsys}','%{vpn}','%{user}','%{src}','%{dst}','%{duration}','%{rcvd}','%{sent}','%{type}','%{service}','%{msg}'"
+            }
+        }
+    }
+    if "nipvisitlog" in [log_tag] {
+        kafka {
+            bootstrap_servers => "10.8.120.59:9092"    #生产者
+            topic_id => "NIP_VISIT_LOG"                   #设置写入kafkatopic
+            compression_type => "gzip"                 #消息压缩方式，默认是none，可选gzip、snappy
+            codec => plain{
+                format => "'%{[fields][l_id]}','%{[fields][l_type]}','log_time','%{dev_name}','%{dev_log_type}','%{VSys}','%{Protocol}','%{SrcIp}','%{SrcPort}','%{DstIp}','%{DstPort}','%{time}','%{RuleName}','%{Application}','%{Profile}','%{SignName}','%{SignId}','%{EventNum}','%{Severity}','%{Category}','%{Os}','%{Action}'"
+            }
+        }
+    }
+    if "SAFELINEEVENT" in [log_tag] {
+        kafka {
+            bootstrap_servers => "10.8.120.59:9092"
+            topic_id => "SAFELINE_ATTACK_LOG"
+            compression_type => "gzip"
+            codec => plain {
+                format => '%{msg},"%{[fields][l_type]}"'
+            }
+        }
+    }
+    if "eSightSlotIndex" in [log_tag] {
+        kafka{
+            bootstrap_servers => "10.8.120.59:9092"    #生产者
+            topic_id => "ESIGHT_SLOT_INDEX"    #设置写入kafka的topic
+            compression_type => "gzip"    #消息压缩模式，默认是none，可选gzip、snappy。
+            codec => plain{
+                format => '%{[baseName]},%{[devName]},%{[slotName]},%{[avgCPU]},%{[avgMEM]},%{[timestamp]}'
+            }
+        }
+    }
+    if "eSightPortIndex" in [log_tag] {
+        kafka{
+            bootstrap_servers => "10.8.120.59:9092"    #生产者
+            topic_id => "ESIGHT_PORT_INDEX"    #设置写入kafka的topic
+            compression_type => "gzip"    #消息压缩模式，默认是none，可选gzip、snappy。
+            codec => plain{
+                format => '%{[baseName]},%{[devName]},%{[portName]},%{[InBandRate]},%{[OutBandRate]},%{[timestamp]}'
+            }
+        }
+    }
+    if "eSightSoftversion" in [log_tag] {
+        kafka{
+            bootstrap_servers => "10.8.120.59:9092"    #生产者
+            topic_id => "ESIGHT_SOFTVERSION_INDEX"    #设置写入kafka的topic
+            compression_type => "gzip"    #消息压缩模式，默认是none，可选gzip、snappy。
+            codec => plain{
+                format => '%{[baseName]},%{[devName]},%{[devtype]},%{[devip]},%{[softversion]},%{[@timestamp]}'
+            }
+        }
+    }
+    if "eSightServerdevice" in [log_tag] {
+        kafka{
+            bootstrap_servers => "10.8.120.59:9092"    #生产者
+            topic_id => "ESIGHT_SERVERDEVICE_INDEX"    #设置写入kafka的topic
+            compression_type => "gzip"    #消息压缩模式，默认是none，可选gzip、snappy。
+            codec => plain{
+                format => '%{[baseName]},%{[dn]},%{[ipAddress]},%{[serverName]},%{[serverModel]},%{[uuid]},%{[aliasname]}'
+            }
+        }
+    }
+    if "anmeng" in [log_tag] {
+        kafka{
+            bootstrap_servers => "10.8.120.59:9092"    #生产者
+            topic_id => "ANMENG_LOG"    #设置写入kafka的topic
+            compression_type => "gzip"    #消息压缩模式，默认是none，可选gzip、snappy。
+            codec => plain{
+                format => "'%{[fields][l_id]}','%{[fields][l_type]}','%{[update_msg]}'"
+            }
+        }
+    }
+    if "yunxiazicmd" in [log_tag] {
+        kafka{
+            bootstrap_servers => "10.8.120.59:9092"    #生产者
+            topic_id => "YUNXIAZI_LOG"    #设置写入kafka的topic
+            compression_type => "gzip"    #消息压缩模式，默认是none，可选gzip、snappy。
+            codec => plain{
+                format => 'command,%{[fields][l_type]},%{[Time]},%{[User]},%{[Source IP]},%{[Resource]},%{[Target IP]},%{[Command]},%{[Action]},%{[fields][l_id]}'
+            }
+        }
+    }
+    if "yunxiaziops" in [log_tag] {
+        kafka{
+            bootstrap_servers => "10.8.120.59:9092"    #生产者
+            topic_id => "YUNXIAZI_LOG"    #设置写入kafka的topic
+            compression_type => "gzip"    #消息压缩模式，默认是none，可选gzip、snappy。
+            codec => plain{
+                format => 'operation,%{[fields][l_type]},%{[Time]},%{[User]},%{[Source IP]},%{[Operation]},%{[Login Type]},%{[Result]},%{[fields][l_id]}'
+            }
+        }
+    }
+    if "yunxiaziacc" in [log_tag] {
+        kafka{
+            bootstrap_servers => "10.8.120.59:9092"    #生产者
+            topic_id => "YUNXIAZI_LOG"    #设置写入kafka的topic
+            compression_type => "gzip"    #消息压缩模式，默认是none，可选gzip、snappy。
+            codec => plain{
+                format => 'account,%{[fields][l_type]},%{[Time]},%{[End Time]},%{[User]},%{[Source IP]},%{[Resource]},%{[Target IP]},%{[Protocol]},%{[Account]},%{[fields][l_id]}'
+            }
+        }
+    }
+    if [fields][l_type] == "stream_messages" {
+        kafka {
+            bootstrap_servers => "10.8.120.59:9092"    #生产者
+            topic_id => "stream_monitor"    #设置写入kafka的topic
+            compression_type => "gzip"    #消息压缩模式，默认是none，可选gzip、snappy。
+            codec => plain{
+                format => '%{message}'
+            }
+        }
+    }
+    if "usgpolicydeny" in [log_tag] {
+        kafka {
+            bootstrap_servers => "10.8.120.59:9092"    #生产者
+            topic_id => "USG_TRAFFIC"                   #设置写入kafkatopic
+            compression_type => "gzip"                 #消息压缩方式，默认是none，可选gzip、snappy
+            codec => plain {
+                format => '%{[fields][l_id]},%{[fields][l_type]},%{[time]},%{dev_name},%{log_type},%{[source-ip]},%{[source-port]},%{[destination-ip]},%{[destination-port]}'
+            }
+        }
+    }
+    if "usgpolicypermit" in [log_tag] {
+        kafka {
+            bootstrap_servers => "10.8.120.59:9092"    #生产者
+            topic_id => "USG_TRAFFIC"                   #设置写入kafkatopic
+            compression_type => "gzip"                 #消息压缩方式，默认是none，可选gzip、snappy
+            codec => plain {
+                format => '%{[fields][l_id]},%{[fields][l_type]},%{[time]},%{dev_name},%{log_type},%{[source-ip]},%{[source-port]},%{[destination-ip]},%{[destination-port]}'
+            }
+        }
+    }
+    if "usgthreattrap" in [log_tag] {
+        kafka {
+            bootstrap_servers => "10.8.120.59:9092"    #生产者
+            topic_id => "USG_TRAFFIC"                   #设置写入kafkatopic
+            compression_type => "gzip"                 #消息压缩方式，默认是none，可选gzip、snappy
+            codec => plain {
+                format => '%{[fields][l_id]},%{[fields][l_type]},%{[DetectTime]},%{dev_name},%{log_type},%{[SrcIp]},%{[SrcPort]},%{[DstIp]},%{[DstPort]}'
+            }
+        }
+    }
+    if "USGSESSION" in [log_tag] {
+        kafka {
+            bootstrap_servers => "10.8.120.59:9092"    #生产者
+            topic_id => "USG_TRAFFIC_SESSION"                   #设置写入kafkatopic
+            compression_type => "gzip"                 #消息压缩方式，默认是none，可选gzip、snappy
+            codec => plain {
+                format => '%{[fields][l_id]},%{[fields][l_type]},%{[BeginTime]},%{[EndTime]},%{[dev_name]},%{usg_log_type},%{[SourceIP]},%{[SourcePort]},%{[DestinationIP]},%{[DestinationPort]},%{[EventSrcIP]},%{[UserName]}'
+            }
+        }
+    }
+    if "usgothers" in [log_tag] {
+        kafka {
+            bootstrap_servers => "10.8.120.59:9092"
+            topic_id => "USG_TRAFFIC"
+            compression_type => "gzip"
+            codec => plain {
+                format => '%{[fields][l_id]},%{[fields][l_type]},%{time},%{dev_name},%{log_type},%{SrcIp},%{SrcPort},%{DstIp},%{DstPort}'
+            }
+        }
+    }
+    if "nelogin" in [log_tag] or "usglogin" in [log_tag] or "celogin" in [log_tag] {
+        kafka {
+            bootstrap_servers => "10.8.120.59:9092"
+            topic_id => "DEV_LOGIN_LOG"
+            compression_type => "gzip"
+            codec => plain {
+                format => "'%{logdate}','%{[fields][l_type]}','%{[fields][l_id]}','%{dev_type}','%{dev_name}','%{Ip}','%{UserType}','%{UserName}','%{log_type}','%{Reason}'"
+            }
+        }
+    }
+    if "svn_login_log" in [log_m_tag] {
+        kafka {
+            bootstrap_servers => "10.8.120.59:9092"
+            topic_id => "SVN_LOGIN_LOG"
+            compression_type => "gzip"
+            codec => plain {
+                format => "'%{[time]}','%{[user]}','%{[fw]}','%{[src]}','%{[dst]}','%{[id]}','%{[fields][l_type]}','%{[fields][l_id]}'"
+            }
+        }
+    }
+    if "firewallatck" in [log_tag] {
+        kafka {
+            bootstrap_servers => "10.8.120.59:9092"    #生产者
+            topic_id => "FIREWALLATCK"    #设置写入kafka的topic
+            compression_type => "gzip"    #消息压缩模式，默认是none，可选gzip、snappy。
+            codec => plain{
+                format => "'%{[fields][l_id]}','%{dev_name}','%{dev_log_type}','%{AttackType}','%{slot}','%{cpu}','%{rx_interface}','%{proto}','%{ip}','%{begin_time}','%{end_time}','%{total_packets}','%{max_speed}','%{Action}'"
+            }
+        }
+    }
+    if "FTOTPUSER" in [log_tag] {
+        kafka {
+            bootstrap_servers => "10.8.120.59:9092"
+            topic_id => "FTOTP_LOG"
+            compression_type => "gzip"
+            codec => plain {
+                format => "'%{[fields][l_type]}','%{[fields][l_id]}','%{[logtime]}','%{[serverip]}','%{[userid]}','%{[token]}','%{[actionid]}','%{[actionresult]}','%{[log_tag]}','%{[logcontent]}'"
+            }
+        }
+    }
+    else if "FTOTPADMIN" in [log_tag] {
+        kafka {
+            bootstrap_servers => "10.8.120.59:9092"
+            topic_id => "FTOTP_LOG"
+            compression_type => "gzip"
+            codec => plain {
+                format => "'%{[fields][l_type]}','%{[fields][l_id]}','%{[logtime]}','%{[clientip]}','%{[operator]}','','%{[actionid]}','%{[actionresult]}','%{[log_tag]}','%{[actionobject]}'"
+            }
+        }
+    }
+    if "nfatck" in [log_tag] and ("NIP" in [dev_name] or "nip" in [dev_name] or "IPS" in [dev_name] or "Nip" in [dev_name]){
+        if "EXCEPTION" in [dev_log_type] or "BOTNET" in [dev_log_type] or "DETECT" in [dev_log_type] or "WORM" in [dev_log_type] or "TROJAN" in [dev_log_type] or "CNC" in [dev_log_type] or "ATTACK" in [dev_log_type]{
+            kafka {
+                bootstrap_servers => "10.8.120.59:9092"    #生产者
+                topic_id => "NIP_FIREWALL_ACTK_LOG"        #设置写入kafkatopic
+                compression_type => "gzip"                 #消息压缩方式，默认是none，可选gzip、snappy
+                codec => plain{
+                    format => "'%{[fields][l_id]}','%{[fields][l_type]}','log_time','%{dev_name}','%{dev_log_type}','%{VSys}','%{Protocol}','%{SrcIp}','%{SrcPort}','%{DstIp}','%{DstPort}','%{time}','%{RuleName}','%{Application}','%{Profile}','%{SignName}','%{SignId}','%{EventNum}','%{Severity}','%{Category}','%{Os}','%{Action}'"
+                }
+            }
+        }
+  
+        if "FIREWALLATCK" in [dev_log_type]{
+            kafka {
+                bootstrap_servers => "10.8.120.59:9092"    #生产者
+                topic_id => "NIP_FIREWALL_ACTK_LOG"    #设置写入kafka的topic
+                compression_type => "gzip"    #消息压缩模式，默认是none，可选gzip、snappy。
+                codec => plain{
+                    format => "'%{[fields][l_id]}','%{dev_name}','%{dev_log_type}','%{AttackType}','%{slot}','%{cpu}','%{rx_interface}','%{proto}','%{ip}','%{begin_time}','%{end_time}','%{total_packets}','%{max_speed}','%{Action}'"
+                }
+            }
+        }
+    }
+}
